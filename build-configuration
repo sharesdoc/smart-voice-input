@@ -1,0 +1,25 @@
+# VoiceInput 默认编译/部署配置（被 ./install 读取）
+# profile 文件 build-configuration.<profile> 可覆盖以下变量
+
+# Python 解释器（conda base，符合全局规则）
+PYTHON_BIN="$HOME/ins/miniconda/bin/python"
+
+# 默认 ASR 引擎：whisper_local | sensevoice | dashscope(阿里云Fun-ASR) | online
+# install -i 会安装全部引擎依赖；引擎可随时在"系统配置"里切换
+ASR_ENGINE="whisper_local"
+
+# 默认 Whisper 本地模型（tiny|base|small|medium）
+WHISPER_MODEL="small"
+
+# 后处理大模型：ollama | online | off
+LLM_MODE="ollama"
+# 本地 Ollama 默认模型
+OLLAMA_MODEL="qwen2.5:7b-instruct"
+
+# -b 时是否运行单元测试（1 运行 / 0 跳过）
+RUN_TESTS_ON_BUILD="1"
+
+# 覆盖率回归底线门禁（J-P3-01）：-b 跑测试时若 voiceinput 总覆盖率低于此值则失败。
+# 这是"防滑底线"(当前总覆盖率约 55%，GUI/硬件模块天然难测)，非 I 文档的 80% 应然目标。
+# 需安装 pytest-cov 才生效；未安装则自动跳过门禁。留空则不启用门禁。
+COV_FAIL_UNDER="50"

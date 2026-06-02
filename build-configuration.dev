@@ -1,0 +1,5 @@
+# profile: dev（开发）—— 与 loc 同档，构建必跑测试
+WHISPER_MODEL="small"
+LLM_MODE="ollama"
+OLLAMA_MODEL="qwen2.5:7b-instruct"
+RUN_TESTS_ON_BUILD="1"

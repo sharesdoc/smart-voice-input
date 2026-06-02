@@ -1,0 +1,60 @@
+# macOS
+.DS_Store
+._*
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python packaging / py2app
+build/
+dist/
+*.egg-info/
+.eggs/
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# install 脚本运行时产物
+verification-2026*
+.install.cfg
+.install-*.pid
+.pid
+log/
+deploy/
+data/
+
+# 应用本地配置/敏感信息快照
+config.json
+*.local.json
+*.secret*
+*.key
+
+# 模型、音频与基准测试临时文件
+models/
+model-cache/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.pcm
+*.npy
+*.npz
+benchmark-*.json
+benchmark-*.csv
+
+# 编辑器/本地工具
+.vscode/
+.idea/
+.aitask.md
+.aidocsdir

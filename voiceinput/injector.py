@@ -29,6 +29,20 @@ def _oplog(fmt: str, *args) -> None:
     get_logger().info(fmt, *args)
 
 
+def _has_accessibility_trust() -> bool:
+    """当前进程是否已获 macOS 辅助功能信任。
+
+    CGEvent 模拟按键依赖该权限；未授权时系统会静默丢弃按键事件，表现为日志看似
+    已注入但目标输入框没有文字。无法检查时不阻断，交由实际系统调用处理。
+    """
+    try:
+        import ApplicationServices  # 懒加载
+
+        return bool(ApplicationServices.AXIsProcessTrusted())
+    except Exception:
+        return True
+
+
 class Injector(Protocol):
     """注入器接口，便于在 app 层替换/测试。"""
 
@@ -50,6 +64,10 @@ class MacInjector:
         """写入文本到当前输入框 (FR-10)。按 method 选择粘贴或键盘直输。"""
         if not text:
             return
+        if not _has_accessibility_trust():
+            _oplog("[OP] 注入失败：当前进程未获 macOS 辅助功能权限，系统会拒绝模拟按键。"
+                   "请在 系统设置→隐私与安全性→辅助功能 授权当前启动项后重启。")
+            raise RuntimeError("缺少 macOS 辅助功能权限，无法模拟按键注入")
         _oplog("[OP] 注入(%s) %d字: %r", self.method, len(text), _clip(text))
         if self.method == "keystroke":
             self._type_keystroke(text)

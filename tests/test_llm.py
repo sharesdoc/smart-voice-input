@@ -114,6 +114,23 @@ def test_postprocess_ollama_success():
     assert client.posted["url"].endswith("/api/chat")
 
 
+def test_ollama_payload_uses_conservative_generation_settings():
+    cfg = Config()
+    cfg.llm.mode = "ollama"
+    cfg.llm.temperature = 0.0
+    cfg.llm.max_output_tokens = 128
+    cfg.llm.reasoning = "off"
+    client = FakeOllamaClient("你好。")
+
+    res = postprocess(cfg, "你好", client=client)
+
+    assert res.ok is True
+    payload = client.posted["json"]
+    assert payload["think"] is False
+    assert payload["options"]["temperature"] == 0.0
+    assert payload["options"]["num_predict"] == 128
+
+
 def test_postprocess_online_success():
     cfg = Config()
     cfg.llm.mode = "online"
@@ -122,6 +139,35 @@ def test_postprocess_online_success():
     assert res.ok is True
     assert res.text == "polished text"
     assert client.posted["url"].endswith("/chat/completions")
+
+
+def test_online_deepseek_payload_disables_thinking():
+    cfg = Config()
+    cfg.llm.mode = "online"
+    cfg.llm.online.base_url = "https://api.deepseek.com/v1"
+    cfg.llm.online.model = "deepseek-chat"
+    cfg.llm.reasoning = "off"
+    cfg.llm.max_output_tokens = 96
+    client = FakeOnlineClient("整理后文本")
+
+    res = postprocess(cfg, "整理前文本", client=client)
+
+    assert res.ok is True
+    payload = client.posted["json"]
+    assert payload["max_tokens"] == 96
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_postprocess_strips_thinking_content():
+    cfg = Config()
+    cfg.llm.mode = "ollama"
+    cfg.llm.strip_thinking = True
+    client = FakeOllamaClient("<think>先分析一下</think>\n最终文本。")
+
+    res = postprocess(cfg, "最终文本", client=client)
+
+    assert res.ok is True
+    assert res.text == "最终文本。"
 
 
 def test_postprocess_degrades_on_error():

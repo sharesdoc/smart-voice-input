@@ -4,8 +4,9 @@
 # Python 解释器（conda base，符合全局规则）
 PYTHON_BIN="$HOME/ins/miniconda/bin/python"
 
-# 默认 ASR 引擎：whisper_local | sensevoice | dashscope(阿里云Fun-ASR) | online
-# install -i 会安装全部引擎依赖；引擎可随时在"系统配置"里切换
+# 默认 ASR 引擎：whisper_local | sensevoice | mlx_whisper | dashscope(阿里云Fun-ASR) | online
+# install -i 改为「按需交互安装」：有终端时交互勾选；无 TTY(CI/管道) 时用此默认引擎。
+# 引擎可随时在"系统配置"里切换（切到未安装的引擎需先补装对应 requirements/asr-*.txt）。
 ASR_ENGINE="whisper_local"
 
 # 默认 Whisper 本地模型（tiny|base|small|medium）
@@ -14,7 +15,7 @@ WHISPER_MODEL="small"
 # 后处理大模型：ollama | online | off
 LLM_MODE="ollama"
 # 本地 Ollama 默认模型
-OLLAMA_MODEL="qwen2.5:7b-instruct"
+OLLAMA_MODEL="qwen2.5:7b-instruct-q4_K_M"
 
 # -b 时是否运行单元测试（1 运行 / 0 跳过）
 RUN_TESTS_ON_BUILD="1"

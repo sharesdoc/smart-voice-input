@@ -2,7 +2,7 @@
 
 from voiceinput.config import Config
 from voiceinput.llm import LlmResult
-from voiceinput.pipeline import Pipeline
+from voiceinput.pipeline import Pipeline, _force_filter_match
 
 
 class FakeInjector:
@@ -59,6 +59,29 @@ def test_empty_transcription_does_nothing():
     inj = FakeInjector()
     p = make_pipeline(cfg, inj, "")
     res = p.run(object())
+    assert res.final_text == ""
+    assert inj.ops == []
+
+
+def test_force_filter_ignores_spaces_and_trailing_punctuation():
+    phrases = ["我", "我的", "我是", "是的", "Yeah", "字幕by索兰娅", "嗯", "嗯嗯"]
+    assert _force_filter_match("嗯嗯", phrases)
+    assert _force_filter_match("嗯嗯。", phrases)
+    assert _force_filter_match("嗯 嗯，", phrases)
+    assert _force_filter_match("嗯-嗯。", phrases)
+    assert _force_filter_match("yeah", phrases)
+    assert _force_filter_match("Yeah.", phrases)
+    assert _force_filter_match("字幕by索兰娅。", phrases)
+
+
+def test_force_filter_blocks_segment_before_injection():
+    cfg = Config()
+    cfg.asr.force_filter_phrases = ["嗯嗯"]
+    inj = FakeInjector()
+    p = make_pipeline(cfg, inj, "嗯嗯。")
+
+    res = p.run(object())
+
     assert res.final_text == ""
     assert inj.ops == []
 

@@ -7,6 +7,7 @@ import pytest
 
 from voiceinput.app import VoiceInputApp, parse_online_form
 from voiceinput.config import Config, load_config
+from voiceinput.llm import system_prompt_for
 
 
 @pytest.fixture
@@ -28,10 +29,61 @@ def test_apply_llm_mode_persists(app, tmp_path, monkeypatch):
     assert load_config().llm.mode == "online"
 
 
+def test_llm_advanced_fields_roundtrip(app):
+    app._field_set("llm_temperature", "0.7")
+    app._field_set("llm_max_output_tokens", "256")
+    app._field_set("llm_reasoning", "low")
+    app._field_set("llm_strip_thinking", False)
+    app._field_set("prompt_template", "只输出最终文本")
+
+    assert app._field_get("llm_temperature") == 0.7
+    assert app._field_get("llm_max_output_tokens") == 256
+    assert app._field_get("llm_reasoning") == "low"
+    assert app._field_get("llm_strip_thinking") is False
+    assert app._field_get("prompt_template") == "只输出最终文本"
+
+
+def test_prompt_template_displays_builtin_default_when_empty(app):
+    assert app.cfg.postprocess.prompt_template == ""
+    assert app._field_get("prompt_template") == system_prompt_for(app.cfg)
+
+
+def test_prompt_template_default_text_is_not_persisted_as_custom(app):
+    default_prompt = app._field_get("prompt_template")
+
+    app._field_set("prompt_template", default_prompt)
+
+    assert app.cfg.postprocess.prompt_template == ""
+    assert app._field_get("prompt_template") == default_prompt
+
+
+def test_prompt_template_blank_restores_builtin_default(app):
+    app._field_set("prompt_template", "只输出最终文本")
+    assert app.cfg.postprocess.prompt_template == "只输出最终文本"
+
+    app._field_set("prompt_template", "")
+
+    assert app.cfg.postprocess.prompt_template == ""
+    assert app._field_get("prompt_template") == system_prompt_for(app.cfg)
+
+
 def test_apply_ollama_model(app, tmp_path, monkeypatch):
     monkeypatch.setenv("VOICEINPUT_CONFIG_DIR", str(tmp_path))
     app.apply_ollama_model("llama3.1:8b")
     assert load_config().llm.ollama.model == "llama3.1:8b"
+
+
+def test_force_filter_normalizes_to_text_only(app):
+    app._field_set("force_filter", "我。, 我的。，嗯, 嗯嗯, Yeah., 字幕by索兰娅")
+
+    assert app.cfg.asr.force_filter_phrases == [
+        "我", "我的", "嗯", "嗯嗯", "yeah", "字幕by索兰娅"
+    ]
+    assert app._field_get("force_filter") == "我,我的,嗯,嗯嗯,yeah,字幕by索兰娅"
+
+
+def test_force_filter_default_display_is_full_recommended_list(app):
+    assert app._field_get("force_filter") == "我,我的,我是,是的,Yeah,字幕by索兰娅,嗯,嗯嗯"
 
 
 def test_apply_whisper_model_invalidates_cache(app, tmp_path, monkeypatch):

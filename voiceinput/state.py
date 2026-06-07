@@ -32,8 +32,8 @@ class AppState(Enum):
     def icon(self) -> str:
         """状态对应的菜单栏图标字符（占位，正式版用模板图标）。"""
         return {
-            AppState.IDLE: "🎙️",
-            AppState.LISTENING: "🔴",
+            AppState.IDLE: "🐰",
+            AppState.LISTENING: "🎙️",
             AppState.TRANSCRIBING: "✍️",
             AppState.REFINING: "🧠",
             AppState.REWRITING: "♻️",

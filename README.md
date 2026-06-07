@@ -1,304 +1,75 @@
-# VoiceInput
+# VoiceInput —— macOS AI 智能语音输入
 
-VoiceInput is an AI-powered voice input tool for macOS. It runs as a menu bar app, records audio through a global hotkey, transcribes speech into text, optionally uses a local or online LLM to fix, polish, organize, or translate the text, and then inserts the final result into the currently focused text field.
+常驻菜单栏的 AI 语音输入工具：**双击 Command 键**说话，语音被本地 Whisper 识别为文字，再由大模型（本地 Ollama 或在线 OpenAI 兼容接口）做**意图识别与智能整理**，自动注入到当前光标处。支持**讯飞式动态重写**：先即时显示原始文本，整理完成后自动删除并替换为通顺的书面句。
 
-The project currently supports running from Python source in the background. It also includes a `py2app` configuration for building a menu bar `.app` without a Dock icon.
+> 完整需求见 [`A-系统需求文档.md`](./A-系统需求文档.md)，设计见 [`B-系统设计文档.md`](./B-系统设计文档.md)。
 
-Chinese documentation: [README.zh-CN.md](README.zh-CN.md)
+## 特性
 
-## Features
+- 🎙️ **全局语音输入**：任意 App 输入框，双击 ⌘ 触发
+- 🧠 **AI 智能整理**：纠错、加标点、删冗余、语序重组（FR-16）
+- ♻️ **动态重写**：删除已注入的不通顺文本，替换为整理版（讯飞式）
+- 🔒 **删除安全边界**：只删本程序注入的字符，绝不误删用户原有文字（FR-17）
+- 🏠 **本地优先**：本地 Whisper + 本地 Ollama，全程可离线
+- ☁️ **在线可选**：可配置 OpenAI 兼容 Base URL / API Key / 模型
+- 🖥️ **双架构**：代码兼容 Apple Silicon (arm64) 与 Intel (x86_64)
 
-- Menu bar app: shows a microphone icon in the macOS menu bar after startup.
-- Hotkey trigger: double-tap `Command` by default to start or stop dictation; custom hotkey combinations are also supported.
-- Continuous dictation: enabled by default. Trigger once to keep listening, automatically segment speech after a pause, and trigger again to stop.
-- Silence-based segmentation: uses VAD to detect pauses; the default pause threshold is about `1.0` second.
-- Multiple ASR engines:
-  - Local `faster-whisper`
-  - `MLX Whisper` for Apple Silicon
-  - Local `SenseVoice-Small`
-  - Aliyun DashScope Fun-ASR
-  - OpenAI-compatible online ASR
-- LLM post-processing:
-  - `raw`: direct transcription without LLM
-  - `polish`: fix typos and punctuation while preserving the original wording as much as possible
-  - `organize`: clean up fillers and reorganize longer text
-  - `translate`: translate the transcribed text
-- LLM backends:
-  - Local Ollama
-  - OpenAI-compatible online API
-  - Disabled
-- Text injection: uses clipboard plus `Command + V` by default, then restores the previous clipboard content; direct keystroke injection is also supported.
-- System settings window: configure language, ASR engine, model, pause duration, post-processing mode, LLM backend, API keys, launch at login, and more.
-- Logs and diagnostics: records ASR, LLM, injection, and end-to-end timing to help debug latency or failures.
-
-## Requirements
-
-- macOS
-- Python 3.10+. The install script uses this Python by default:
+## 快速开始
 
 ```bash
-~/ins/miniconda/bin/python
-```
-
-- A microphone
-- Network access for the first local model download
-- Ollama, if you want local LLM post-processing
-
-> Note: this project depends on macOS-specific capabilities such as PyObjC, Quartz, sounddevice, and pynput. On non-macOS systems, only part of the pure logic test suite can run; the desktop voice input app will not work normally.
-
-## Installation
-
-Enter the project directory:
-
-```bash
-cd $HOME/wks/ai/tools/voice-input.github
-```
-
-Install dependencies and initialize the app configuration:
-
-```bash
+# 1) 安装全部依赖（含 5 个 ASR 引擎；conda base 环境）
 ./install -i
-```
 
-The install script will:
-
-- install dependencies from `requirements.txt`
-- initialize the app configuration
-- pre-download or preload the local speech model for the current ASR configuration
-- try to pull the default Ollama model if Ollama is configured
-
-If your Python interpreter is not located at `~/ins/miniconda/bin/python`, update `PYTHON_BIN` in the `install` script or `.install.cfg`.
-
-## Start And Stop
-
-Start the app:
-
-```bash
-./install -s
-```
-
-After startup, a microphone icon should appear in the macOS menu bar.
-
-Stop the app:
-
-```bash
-./install -k
-```
-
-Restart:
-
-```bash
-./install -r
-```
-
-Check status:
-
-```bash
-./install -v
-```
-
-View logs:
-
-```bash
-./install -l
-```
-
-You can also run it directly from source:
-
-```bash
-~/ins/miniconda/bin/python -m voiceinput
-```
-
-## macOS Permissions
-
-After the first launch, grant the required permissions in "System Settings -> Privacy & Security":
-
-- Microphone: required for audio recording.
-- Accessibility: required to inject text into the active app.
-- Input Monitoring: required to listen for the global hotkey.
-
-After granting permissions, restart VoiceInput:
-
-```bash
-./install -r
-```
-
-If the hotkey does not work, the usual cause is that Input Monitoring or Accessibility permission has not been granted to the current Python interpreter, terminal app, IDE, or packaged app.
-
-## Usage
-
-1. Start VoiceInput.
-2. Place the cursor in any editable text field, such as an editor, browser, or chat window.
-3. Double-tap `Command` to enter dictation mode.
-4. Start speaking.
-5. After the configured pause duration, VoiceInput transcribes the speech segment and inserts the text at the cursor.
-6. Double-tap `Command` again to stop continuous dictation.
-
-You can also click "Start/Stop Dictation" from the menu bar menu.
-
-## Configuration
-
-Click the menu bar icon and open "System Settings".
-
-Common settings:
-
-- Language: `Chinese` or `English`.
-- Speech recognition engine:
-  - `Local Whisper (faster-whisper)`: general local ASR option.
-  - `Local MLX Whisper (Apple)`: recommended only for Apple Silicon Macs.
-  - `Local SenseVoice-Small`: fast Chinese ASR with punctuation.
-  - `Aliyun Fun-ASR`: online ASR that requires a DashScope API key.
-  - `Online OpenAI`: OpenAI-compatible `/audio/transcriptions` endpoint.
-- Continuous dictation: when enabled, one trigger keeps listening; when disabled, dictation becomes a start/stop toggle.
-- Pause seconds: controls how long silence must last before a segment is considered complete. Supported formats include `0.8`, `800ms`, and `1s`.
-- Post-processing mode: raw transcription, polish, organize, or translate.
-- LLM engine: local Ollama, online, or disabled.
-- Launch at login: enable or disable the LaunchAgent.
-
-Configuration file:
-
-```text
-~/Library/Application Support/VoiceInput/config.json
-```
-
-Log file:
-
-```text
-~/Library/Logs/VoiceInput/voiceinput.log
-```
-
-## API Keys
-
-Online LLM and OpenAI-compatible online ASR share the same online API key. The app reads this environment variable first:
-
-```bash
-export VOICEINPUT_ONLINE_API_KEY="your API key"
-```
-
-You can also enter the key in the system settings window. The app will try to store it in the macOS Keychain.
-
-DashScope Fun-ASR supports two key sources:
-
-- Environment variable:
-
-```bash
-export DASHSCOPE_API_KEY="your DashScope API key"
-```
-
-- Manual entry in the system settings window, stored in the Keychain.
-
-## Ollama Post-Processing
-
-The default LLM mode is local Ollama. The default model is:
-
-```text
-qwen2.5:7b-instruct
-```
-
-Install Ollama and make sure the service is reachable:
-
-```bash
-ollama pull qwen2.5:7b-instruct
-ollama serve
-```
-
-If you do not need LLM polishing, set the post-processing mode to `raw` or set the LLM engine to `off` in the system settings.
-
-## Build A macOS App
-
-The project includes `setup.py` and can be packaged with `py2app`:
-
-```bash
-~/ins/miniconda/bin/python -m pip install py2app
-~/ins/miniconda/bin/python setup.py py2app
-```
-
-The output app is:
-
-```text
-dist/VoiceInput.app
-```
-
-Local speech models are not bundled into the app. They are downloaded into the user's cache directory at runtime.
-
-## Development And Testing
-
-Run syntax checks and unit tests:
-
-```bash
+# 2) 校验（py_compile + 单元测试，无需 GUI/麦克风）
 ./install -b
+
+# 3) 启动菜单栏应用（nohup 后台）
+./install -s            # 停止 ./install -k；重启 ./install -r
 ```
 
-Run pytest directly:
+首次启动需在「系统设置 → 隐私与安全性」授予：
+- **麦克风**（录音）
+- **辅助功能** 与 **输入监控**（全局热键 + 模拟键盘注入）
+
+## 使用
+
+1. 启动后菜单栏出现 🎙️ 图标。
+2. 在任意输入框中**双击 Command 键**进入连续听写。
+3. 说话，停顿约 1 秒自动成段并输入；继续说继续输入；再次**双击 Command** 退出听写。
+4. 点击图标 →「**系统配置…**」打开统一设置页（语言/ASR引擎/后处理/大模型等，含保存/恢复默认）。
+
+## 配置
+
+全部设置集中在菜单「**系统配置…**」一个对话框里（分门别类 + 保存/取消/恢复默认）。
+配置文件：`~/Library/Application Support/VoiceInput/config.json`；API Key 存于 **macOS 钥匙串**，不写入配置文件。
+
+| 项 | 默认 | 说明 |
+|----|------|------|
+| 语音识别引擎 | 本地 Whisper | 本地Whisper / 本地MLX Whisper / 本地SenseVoice / 阿里云Fun-ASR / 在线OpenAI |
+| 后处理模式 | polish | 纯转写 / 智能纠错润色 / 智能整理 / 翻译 |
+| 重写方式 | rewrite_once | 整理后注入 / 即时预览重写 |
+| 大模型引擎 | ollama | 本地 Ollama / 在线 / 关闭 |
+| Ollama 模型 | qwen2.5:7b-instruct-q4_K_M | 未安装时执行 `ollama pull qwen2.5:7b-instruct-q4_K_M; ollama list` |
+| 加工参数 | 低温度/关闭思考 | 默认少改写原话、限制输出长度、清理 thinking 内容 |
+| 停顿秒数 | 1.0 | 静音多久算一句说完 |
+| 语言 | 中文 | 中文 / 英文（界面 + 识别同时切换） |
+
+## 架构
+
+```
+双击⌘(hotkey) → 录音(audio) → Whisper(asr) → 原始文本
+   → LLM整理(llm: ollama/online) → 注入/动态重写(pipeline + injector + session 安全计数)
+   状态贯穿 state → 菜单栏(app)
+```
+
+纯逻辑模块（config/state/session/pipeline/llm/hotkey 判定）零 macOS 依赖、可单测；
+GUI/音频/ASR/注入为懒加载的薄封装。
+
+## 测试
 
 ```bash
-~/ins/miniconda/bin/python -m pytest tests/ -q
+./install -b                                   # 校验 + 单元测试
+~/ins/miniconda/bin/python -m pytest tests/ --cov=voiceinput   # 覆盖率报告
 ```
 
-Run the ASR benchmark:
-
-```bash
-./install -t asr
-```
-
-Benchmark with a specific WAV file:
-
-```bash
-./install -t asr /path/to/audio.wav
-```
-
-## Notes
-
-- This is a macOS desktop app, not a web service. It does not listen on any port. The `-p/--port` option in the `install` script is kept only for compatibility and has no effect.
-- Local model downloads can be large. `faster-whisper`, `SenseVoice`, `MLX Whisper`, `torch`, and related dependencies may also use significant disk space.
-- `MLX Whisper` is only suitable for Apple Silicon Macs. On Intel Macs, use `faster-whisper`, `SenseVoice`, or an online ASR engine.
-- The default injection method briefly writes to the clipboard and then restores the previous clipboard content. This is the most compatible option for most apps, but apps with unusual paste behavior may need direct keystroke injection.
-- If LLM post-processing fails, the app falls back to the raw ASR text instead of blocking input.
-- `organize` mode rewrites more actively and is better for longer text. Use `polish` or `raw` if you need to preserve the original wording strictly.
-- If continuous dictation is stopped while a segment is being processed, the current segment will be canceled before injection, and queued unprocessed segments will be discarded.
-- The permission target may be Python, Terminal, your IDE, or `VoiceInput.app`, depending on how you start the app.
-
-## FAQ
-
-### The menu bar icon does not appear
-
-Check status and logs:
-
-```bash
-./install -v
-./install -l
-```
-
-If dependencies are missing, run:
-
-```bash
-./install -i
-```
-
-### Double-tapping Command does nothing
-
-Check Input Monitoring and Accessibility permissions, then restart:
-
-```bash
-./install -r
-```
-
-### Speech is recognized but text is not inserted
-
-This is usually caused by missing Accessibility permission, or by the target input field rejecting simulated paste events. Confirm macOS permissions first, then try another target app.
-
-### Local LLM polishing fails
-
-Make sure Ollama is running and the configured model has been pulled:
-
-```bash
-ollama list
-ollama pull qwen2.5:7b-instruct
-```
-
-You can also disable LLM temporarily and use raw transcription.
-
-### Online models do not work
-
-Check the API key, Base URL, and model name. Online LLM uses an OpenAI-compatible `/chat/completions` endpoint, and online ASR uses an OpenAI-compatible `/audio/transcriptions` endpoint.
-
+核心安全逻辑（会话计数、动态重写、双击检测、降级）由 138 单测覆盖。

@@ -1,5 +1,5 @@
 # profile: loc（本地，默认）—— 速度优先
 WHISPER_MODEL="small"
 LLM_MODE="ollama"
-OLLAMA_MODEL="qwen2.5:7b-instruct"
+OLLAMA_MODEL="qwen2.5:7b-instruct-q4_K_M"
 RUN_TESTS_ON_BUILD="1"

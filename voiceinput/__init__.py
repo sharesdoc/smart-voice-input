@@ -15,5 +15,14 @@
 不依赖 macOS 专用库，可在任意环境单元测试；GUI/音频/ASR 等重型依赖采用懒加载。
 """
 
+import os as _os
+
+# Intel(x86_64) mac 上 torch / ctranslate2 / numba(llvmlite) 各自静态链接了一份
+# OpenMP 运行时(libiomp5 / libomp)，同进程加载多份会触发
+#   "OMP: Error #15: Initializing libiomp5.dylib, but found ... already initialized"
+# 并以 Abort trap: 6 直接杀进程（首次出现在懒加载 ASR 模型的 _prewarm 线程）。
+# 必须在任何重型库导入前设置此环境变量，故放在包初始化最前；setdefault 允许外部覆盖。
+_os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 __version__ = "0.1.0"
 __app_name__ = "VoiceInput"

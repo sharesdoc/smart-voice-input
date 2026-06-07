@@ -9,6 +9,7 @@ import platform
 
 import pytest
 
+from voiceinput import injector as injector_mod
 from voiceinput.injector import MacInjector, make_injector
 
 _skip_non_mac = pytest.mark.skipif(
@@ -36,6 +37,7 @@ def test_invalid_method_falls_back_to_paste():
 
 @_skip_non_mac
 def test_type_text_dispatches_keystroke(monkeypatch):
+    monkeypatch.setattr(injector_mod, "_has_accessibility_trust", lambda: True)
     inj = make_injector("keystroke")
     calls = []
     monkeypatch.setattr(inj, "_type_keystroke", lambda t: calls.append(("ks", t)))
@@ -47,6 +49,7 @@ def test_type_text_dispatches_keystroke(monkeypatch):
 
 @_skip_non_mac
 def test_type_text_dispatches_paste(monkeypatch):
+    monkeypatch.setattr(injector_mod, "_has_accessibility_trust", lambda: True)
     inj = make_injector("paste")
     calls = []
     monkeypatch.setattr(inj, "_type_keystroke", lambda t: calls.append(("ks", t)))
@@ -58,8 +61,21 @@ def test_type_text_dispatches_paste(monkeypatch):
 
 @_skip_non_mac
 def test_empty_text_no_dispatch(monkeypatch):
+    monkeypatch.setattr(injector_mod, "_has_accessibility_trust", lambda: False)
     inj = make_injector("keystroke")
     calls = []
     monkeypatch.setattr(inj, "_type_keystroke", lambda t: calls.append(t))
     inj.type_text("")
+    assert calls == []
+
+
+@_skip_non_mac
+def test_missing_accessibility_permission_blocks_injection(monkeypatch):
+    monkeypatch.setattr(injector_mod, "_has_accessibility_trust", lambda: False)
+    inj = make_injector("paste")
+    calls = []
+    monkeypatch.setattr(inj, "_type_paste",
+                        lambda t, **k: calls.append(("paste", t)))
+    with pytest.raises(RuntimeError, match="辅助功能"):
+        inj.type_text("hello")
     assert calls == []

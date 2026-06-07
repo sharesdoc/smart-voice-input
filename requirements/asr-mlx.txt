@@ -1,0 +1,3 @@
+# ASR 引擎：MLX Whisper（Apple Silicon MLX 加速，比 CPU faster-whisper 快很多）
+# 仅 arm64 Mac 可用；环境标记保证在 Intel 上不会被安装。
+mlx-whisper>=0.4.0; platform_machine == "arm64" and sys_platform == "darwin"

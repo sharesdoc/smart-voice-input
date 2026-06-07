@@ -16,7 +16,7 @@ import threading
 
 from . import __app_name__, __version__
 from .audio import Recorder
-from .config import Config, load_config, save_config
+from .config import DEFAULT_OLLAMA_MODEL, Config, load_config, save_config
 from .hotkey import GlobalHotkeyListener
 from .injector import make_injector
 from .llm import list_ollama_models
@@ -103,6 +103,12 @@ _ENUMS: dict[str, list] = {
         ("online", "在线", "Online"),
         ("off", "关闭", "Off"),
     ],
+    "reasoning": [
+        ("off", "关闭思考(默认)", "Off (default)"),
+        ("low", "低", "Low"),
+        ("medium", "中", "Medium"),
+        ("high", "高", "High"),
+    ],
     "dskey_source": [
         ("env", "使用环境变量 DASHSCOPE_API_KEY", "Use env DASHSCOPE_API_KEY"),
         ("manual", "手动输入", "Manual input"),
@@ -120,52 +126,40 @@ _LABELS: dict[str, tuple] = {
     "dashscope_key": ("Fun-ASR API Key", "Fun-ASR API Key"),
     "continuous": ("连续听写", "Continuous"),
     "pause": ("停顿秒数", "Pause seconds"),
+    "soft_cap": ("开始探测断句(秒)", "Start probing (sec)"),
+    "hard_cap": ("强制切断时间(秒)", "Force cut (sec)"),
+    "soft_cap_step": ("探测间隔(秒)", "Probe interval (sec)"),
+    "auto_polish_on_hard_cut": ("强制切自动润色", "Auto-polish on force cut"),
+    "silence_threshold": ("静音阈值(VAD)", "Silence threshold (VAD)"),
+    "noise_filter": ("底噪幻觉拦截", "Noise filter"),
+    "noise_min_voice_1char": ("1字最少语音(秒)", "1-char min voice (s)"),
+    "noise_min_voice_2char": ("2字最少语音(秒)", "2-char min voice (s)"),
+    "noise_min_voice_3char": ("3字最少语音(秒)", "3-char min voice (s)"),
     "ppmode": ("后处理模式", "Post-process"),
     "llm_mode": ("大模型引擎", "LLM engine"),
     "ollama_model": ("Ollama模型", "Ollama model"),
     "online_base": ("在线BaseURL", "Online BaseURL"),
     "online_model": ("在线模型", "Online model"),
     "online_key": ("在线APIKey", "Online APIKey"),
+    "llm_temperature": ("随机性/温度", "Temperature"),
+    "llm_max_output_tokens": ("输出上限", "Max output tokens"),
+    "llm_reasoning": ("思考/推理", "Reasoning"),
+    "llm_strip_thinking": ("清理思考内容", "Strip thinking"),
+    "prompt_template": ("自定义系统提示词", "Custom system prompt"),
     "autostart": ("开机自启", "Launch at login"),
+    "force_filter": ("强制过滤短语", "Force-filter phrases"),
+    "asr_online_base":  ("ASR服务BaseURL", "ASR BaseURL"),
+    "asr_online_model": ("ASR服务模型",    "ASR model"),
+    "asr_online_key":   ("ASR服务APIKey",  "ASR API Key"),
+    "denoise_enabled": ("神经网络降噪", "Neural denoising"),
+    "denoise_attenuation": ("降噪强度", "Denoise strength"),
+    "denoise_dry_wet_mix": ("干湿混合比", "Dry/wet mix"),
+    "svr_port": ("SenseVoice 服务端口", "Server port"),
+    "svr_control": ("SenseVoice 服务", "Server"),
 }
 
 # 设置页布局（有序）：("H",(中,英)) 分组标题；("C",(中,英)) 说明注释；
 # ("F", id, enum或None, kind) 字段。kind: enum/free/secret
-_FIELDS: list = [
-    ("H", ("语言", "Language")),
-    ("F", "language", "language", "enum"),
-    ("H", ("语音识别（听成文字）", "Speech Recognition")),
-    ("C", ("可选：本地Whisper / 本地SenseVoice-Small / 阿里云Fun-ASR / 在线OpenAI",
-            "options: Local Whisper / Local SenseVoice-Small / Aliyun Fun-ASR / Online OpenAI")),
-    ("F", "asr_engine", "asr_engine", "enum"),
-    ("C", ("仅本地Whisper时生效：tiny/base/small/medium",
-            "Local Whisper only: tiny/base/small/medium")),
-    ("F", "whisper_model", None, "free"),
-    ("F", "mlx_model", None, "free"),
-    ("C", ("阿里云Fun-ASR 的 Key 来源 + 手动Key（仅 dashscope 用）",
-            "Fun-ASR key source + manual key (dashscope only)")),
-    ("F", "dashscope_key_source", "dskey_source", "enum"),
-    ("F", "dashscope_key", None, "free"),
-    ("H", ("听写交互", "Dictation")),
-    ("F", "continuous", "bool", "enum"),
-    ("C", ("停顿多少秒算说完（0.2~5）", "Seconds of silence to end (0.2-5)")),
-    ("F", "pause", None, "free"),
-    ("H", ("文字加工（纠错/润色）", "Post-processing")),
-    ("C", ("纯转写 / 智能纠错润色 / 智能整理 / 翻译", "Raw / Polish / Organize / Translate")),
-    ("F", "ppmode", "ppmode", "enum"),
-    ("H", ("加工用大模型", "LLM for post-processing")),
-    ("F", "llm_mode", "llm_mode", "enum"),
-    ("F", "ollama_model", None, "free"),
-    ("H", ("在线大模型（可选）", "Online LLM (optional)")),
-    ("F", "online_base", None, "free"),
-    ("F", "online_model", None, "free"),
-    ("C", ("留空保持不变", "leave blank to keep current")),
-    ("F", "online_key", None, "secret"),
-    ("H", ("其他", "Misc")),
-    ("F", "autostart", "bool", "enum"),
-]
-
-
 def _enum_display(enum: str, internal, lang: str) -> str:
     for it in _ENUMS[enum]:
         if it[0] == internal:
@@ -213,6 +207,10 @@ class VoiceInputApp:
 
         # 每段输出监控：记录实际输出文本并检测疑似重复，写入日志便于稳定性分析
         self._out_monitor = OutputMonitor()
+        # 降噪引擎缓存（懒加载，配置变更时清除）
+        self._denoise_cache = None
+        # 启动时检测 Ollama 可用性：不可用则自动关闭"强制切自动润色"
+        self._check_and_disable_auto_polish_if_ollama_gone()
 
     # ---- ASR 懒加载 ----
 
@@ -281,6 +279,26 @@ class VoiceInputApp:
         finally:
             self._deactivate()
 
+    def _error_alert_with_log_button(self, title: str, message: str) -> None:
+        """显示错误弹框，并提供查看日志按钮。"""
+        self._activate()
+        try:
+            try:
+                from AppKit import NSAlert
+
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(title)
+                alert.setInformativeText_(message)
+                alert.addButtonWithTitle_("确定")
+                alert.addButtonWithTitle_("查看日志")
+                resp = alert.runModal()
+                if int(resp) == 1001:  # NSAlertSecondButtonReturn
+                    self._open_log(None)
+            except Exception:
+                self._alert(title, message)
+        finally:
+            self._deactivate()
+
     def _set_state(self, name: str) -> None:
         """pipeline 回调用字符串名设置状态。"""
         try:
@@ -335,21 +353,40 @@ class VoiceInputApp:
 
     # ---- 连续听写（默认）：一次触发，持续监听，按停顿自动分段输入 ----
 
+    @staticmethod
+    def _effective_vad_caps(engine: str, soft: float, hard: float):
+        """按 ASR 引擎返回生效的软封顶上限 (X-103 审查整改 [2])。
+
+        在线引擎(dashscope/online)单次时长有上限且约 30s 超时，长段会整段失败，
+        故收紧到安全值(25/40s)，不依赖用户手动改配置；本地引擎用配置原值。
+        """
+        if engine in ("dashscope", "online"):
+            soft = min(soft, 25.0) if soft > 0 else 25.0
+            hard = min(hard, 40.0) if hard > 0 else 40.0
+        return soft, hard
+
     def _new_continuous_recorder(self):
         from .audio import Recorder, SilenceDetector
 
         # 连续听写必须有 VAD 来切段（即使 cfg.vad.enabled 关闭也强制启用）
+        # 软封顶：放录音/少停顿时单段过长会逐步放宽所需静音，就近切段避免无限累积。
+        soft, hard = self._effective_vad_caps(
+            self.cfg.asr.engine, self.cfg.vad.soft_cap_sec, self.cfg.vad.hard_cap_sec)
         vad = SilenceDetector(
             silence_threshold=self.cfg.vad.silence_threshold,
             silence_sec=self.cfg.vad.silence_sec,
             min_speech_sec=self.cfg.vad.min_speech_sec,
+            soft_cap_sec=soft,
+            hard_cap_sec=hard,
+            soft_cap_step_sec=self.cfg.vad.soft_cap_step_sec,
         )
-        return Recorder(vad=vad, on_segment=self._enqueue_segment)
+        denoise = self._get_denoise_engine()
+        return Recorder(vad=vad, on_segment=self._enqueue_segment, denoise=denoise)
 
-    def _enqueue_segment(self, seg) -> None:
-        """采集线程回调：仅入队，耗时处理交给 worker（避免阻塞采集）。"""
+    def _enqueue_segment(self, seg, speech_sec: float = 0.0) -> None:
+        """采集线程回调：仅入队(段音频, VAD语音时长)，耗时处理交给 worker。"""
         if self._seg_queue is not None:
-            self._seg_queue.put(seg)
+            self._seg_queue.put((seg, speech_sec))
 
     def _segment_worker(self) -> None:
         """后台顺序处理每个语音段：ASR → LLM → 注入，保证输入顺序。"""
@@ -358,12 +395,13 @@ class VoiceInputApp:
         assert self._stop_worker is not None and self._seg_queue is not None
         while not self._stop_worker.is_set():
             try:
-                seg = self._seg_queue.get(timeout=0.3)
+                item = self._seg_queue.get(timeout=0.3)
             except queue.Empty:
                 continue
-            if seg is None:
+            if item is None:                       # 关闭哨兵
                 self._seg_queue.task_done()
                 break
+            seg, speech_sec = item                 # (段音频, VAD 语音时长)
             try:
                 pipeline = Pipeline(
                     cfg=self.cfg,
@@ -372,7 +410,7 @@ class VoiceInputApp:
                     on_state=self._set_state_listening,
                 )
                 self._current_pipeline = pipeline
-                res = pipeline.run(seg)
+                res = pipeline.run(seg, speech_sec=speech_sec)
                 self._out_monitor.record(res.final_text)
             except Exception as exc:
                 self._log.warning("分段处理失败: %s", exc)
@@ -397,6 +435,12 @@ class VoiceInputApp:
         except Exception as exc:
             self._log.warning("启动连续听写失败: %s", exc)
             self._continuous_active = False
+            # 通知 worker 退出并唤醒阻塞在 get() 的线程，避免泄漏
+            if self._stop_worker is not None:
+                self._stop_worker.set()
+            if self._seg_queue is not None:
+                self._drain_queue(self._seg_queue)
+                self._seg_queue.put(None)
             self._sm.force_idle()
             if self._busy.locked():
                 self._busy.release()
@@ -439,17 +483,53 @@ class VoiceInputApp:
 
     # ---- 切换式（回退路径，仅在关闭连续听写时使用） ----
 
+    def _get_denoise_engine(self):
+        """创建（或返回缓存的）降噪引擎实例。
+
+        未启用时返回 None。引擎加载失败时也返回 None（不阻断录音）。
+        配置变更时需先调用 _clear_denoise_cache() 使旧实例失效。
+        """
+        if not self.cfg.denoise.enabled:
+            return None
+        if hasattr(self, '_denoise_cache') and self._denoise_cache is not None:
+            return self._denoise_cache
+        from .denoise import make_denoise_engine
+        dc = self.cfg.denoise
+        self._log.info(
+            "创建降噪引擎: engine=%s enabled=%s attenuation=%.2f dry_wet=%.2f "
+            "resample=%s model=%s",
+            dc.engine, dc.enabled, dc.attenuation, dc.dry_wet_mix,
+            dc.resample_quality, dc.onnx_model_path)
+        engine = make_denoise_engine(dc)
+        self._denoise_cache = engine
+        if engine is not None:
+            self._log.info("降噪引擎已就绪")
+        else:
+            self._log.info("降噪引擎不可用（模型未找到或依赖缺失），录音链路直通")
+        return engine
+
+    def _clear_denoise_cache(self) -> None:
+        """清除降噪引擎缓存（配置变更后调用）。"""
+        self._denoise_cache = None
+
     def _new_recorder(self):
         from .audio import Recorder, SilenceDetector
 
         vad = None
         if self.cfg.vad.enabled:
+            # 软封顶与连续听写保持一致，避免用户自定义 soft/hard_cap 在切换式下失效。
+            soft, hard = self._effective_vad_caps(
+                self.cfg.asr.engine, self.cfg.vad.soft_cap_sec, self.cfg.vad.hard_cap_sec)
             vad = SilenceDetector(
                 silence_threshold=self.cfg.vad.silence_threshold,
                 silence_sec=self.cfg.vad.silence_sec,
                 min_speech_sec=self.cfg.vad.min_speech_sec,
+                soft_cap_sec=soft,
+                hard_cap_sec=hard,
+                soft_cap_step_sec=self.cfg.vad.soft_cap_step_sec,
             )
-        return Recorder(vad=vad, on_auto_stop=self._on_vad_stop)
+        denoise = self._get_denoise_engine()
+        return Recorder(vad=vad, on_auto_stop=self._on_vad_stop, denoise=denoise)
 
     def _start_record(self) -> None:
         if not self._busy.acquire(blocking=False):
@@ -503,6 +583,23 @@ class VoiceInputApp:
         save_config(self.cfg)
         if changed:
             self._rebuild_menu()
+
+    def _ollama_available(self) -> bool:
+        """向 Ollama /api/tags 发轻量请求检测是否可用（3s 超时）。"""
+        try:
+            from .llm import check_ollama_available
+            return check_ollama_available(self.cfg, timeout=3)
+        except Exception:
+            return False
+
+    def _check_and_disable_auto_polish_if_ollama_gone(self) -> None:
+        """启动时检测：Ollama 不可用则自动关闭强制切润色。"""
+        if not self.cfg.vad.auto_polish_on_hard_cut:
+            return
+        if not self._ollama_available():
+            self._log.warning("Ollama 不可用，自动关闭「强制切自动润色」")
+            self.cfg.vad.auto_polish_on_hard_cut = False
+            save_config(self.cfg)
 
     def apply_continuous(self, enabled: bool) -> None:
         self.cfg.general.continuous_dictation = enabled
@@ -750,6 +847,33 @@ class VoiceInputApp:
         except Exception as exc:
             return self._t("conn_fail", err=exc)
 
+    def default_ollama_model_missing_message(self) -> str:
+        """默认 Ollama 模型缺失时的用户提示；无需提示则返回空字符串。"""
+        if self.cfg.postprocess.mode == "raw":
+            return ""
+        if self.cfg.llm.mode != "ollama":
+            return ""
+        if self.cfg.llm.ollama.model != DEFAULT_OLLAMA_MODEL:
+            return ""
+        models = self.available_ollama_models()
+        if DEFAULT_OLLAMA_MODEL in models:
+            return ""
+        cmd = f"ollama pull {DEFAULT_OLLAMA_MODEL}; ollama list"
+        if self.cfg.general.language == "en":
+            return (
+                f"Default local model is not installed: {DEFAULT_OLLAMA_MODEL}\n\n"
+                f"Run this command in Terminal:\n{cmd}"
+            )
+        return (
+            f"未检测到默认本地文字加工模型：{DEFAULT_OLLAMA_MODEL}\n\n"
+            f"请在终端执行：\n{cmd}"
+        )
+
+    def _warn_default_ollama_model_missing(self) -> None:
+        msg = self.default_ollama_model_missing_message()
+        if msg:
+            self._alert(self._t("menu_ollama_model"), msg)
+
 
     # ---- 构建与运行 ----
 
@@ -771,6 +895,7 @@ class VoiceInputApp:
             None,
             rumps.MenuItem(t("menu_system_settings"), callback=self._open_system_settings),
             rumps.MenuItem(t("menu_logs"), callback=self._open_log),
+            rumps.MenuItem(t("menu_clear_logs"), callback=self._clear_logs),
             rumps.MenuItem(t("menu_about"), callback=self._open_about),
             None,
             rumps.MenuItem(t("menu_quit"), callback=self._quit),
@@ -892,6 +1017,11 @@ class VoiceInputApp:
         if fid == "dashscope_key":      # 明文显示已存的手动 Key
             from .config import get_dashscope_key
             return get_dashscope_key() or ""
+        if fid == "asr_online_key":
+            from .config import get_api_key
+            return self._KEY_PLACEHOLDER if get_api_key() else ""
+        if fid == "prompt_template":
+            return c.postprocess.prompt_template or self._default_system_prompt()
         return {
             "language": c.general.language,
             "asr_engine": c.asr.engine,
@@ -904,8 +1034,29 @@ class VoiceInputApp:
             "ollama_model": c.llm.ollama.model,
             "online_base": c.llm.online.base_url,
             "online_model": c.llm.online.model,
+            "llm_temperature": c.llm.temperature,
+            "llm_max_output_tokens": c.llm.max_output_tokens,
+            "llm_reasoning": c.llm.reasoning,
+            "llm_strip_thinking": c.llm.strip_thinking,
             "autostart": c.general.autostart,
             "dashscope_key_source": c.asr.dashscope_key_source,
+            "soft_cap": c.vad.soft_cap_sec,
+            "hard_cap": c.vad.hard_cap_sec,
+            "soft_cap_step": c.vad.soft_cap_step_sec,
+            "auto_polish_on_hard_cut": c.vad.auto_polish_on_hard_cut,
+            "silence_threshold": c.vad.silence_threshold,
+            "noise_filter": c.vad.noise_filter,
+            "noise_min_voice_1char": c.vad.noise_min_voice_1char_sec,
+            "noise_min_voice_2char": c.vad.noise_min_voice_2char_sec,
+            "noise_min_voice_3char": c.vad.noise_min_voice_3char_sec,
+            # 强制过滤：内部存纯文字 list，UI 层用英文逗号紧凑展示
+            "force_filter": ",".join(c.asr.force_filter_phrases),
+            "asr_online_base":  c.asr.online_base_url,
+            "asr_online_model": c.asr.online_model,
+            "denoise_enabled": c.denoise.enabled,
+            "denoise_attenuation": c.denoise.attenuation,
+            "denoise_dry_wet_mix": c.denoise.dry_wet_mix,
+            "svr_port": c.asr.sensevoice_server_port,
         }.get(fid)
 
     def _field_set(self, fid: str, val) -> None:
@@ -932,6 +1083,17 @@ class VoiceInputApp:
             c.llm.online.base_url = val
         elif fid == "online_model":
             c.llm.online.model = val
+        elif fid == "llm_temperature":
+            c.llm.temperature = max(0.0, min(2.0, float(val)))
+        elif fid == "llm_max_output_tokens":
+            c.llm.max_output_tokens = max(0, min(4096, int(float(val))))
+        elif fid == "llm_reasoning":
+            c.llm.reasoning = val if val in {"off", "low", "medium", "high"} else "off"
+        elif fid == "llm_strip_thinking":
+            c.llm.strip_thinking = bool(val)
+        elif fid == "prompt_template":
+            text = str(val or "").strip()
+            c.postprocess.prompt_template = "" if text == self._default_system_prompt() else text
         elif fid == "autostart":
             c.general.autostart = bool(val)
         elif fid == "online_key":
@@ -943,74 +1105,73 @@ class VoiceInputApp:
             if val:
                 from .config import set_dashscope_key
                 set_dashscope_key(val)
+        elif fid == "soft_cap":
+            c.vad.soft_cap_sec = float(val)
+        elif fid == "hard_cap":
+            c.vad.hard_cap_sec = float(val)
+        elif fid == "soft_cap_step":
+            c.vad.soft_cap_step_sec = float(val)
+        elif fid == "auto_polish_on_hard_cut":
+            enabled = bool(val)
+            if enabled and not self._ollama_available():
+                self._log.warning("Ollama 不可用，拒绝开启自动润色")
+                return  # 不保存，保持关闭
+            c.vad.auto_polish_on_hard_cut = enabled
+        elif fid == "silence_threshold":
+            # RMS 静音阈值：越大越不易把底噪当人声。夹到合理区间，防误填。
+            c.vad.silence_threshold = max(0.005, min(0.2, float(val)))
+        elif fid == "noise_filter":
+            c.vad.noise_filter = bool(val)
+        elif fid in ("noise_min_voice_1char", "noise_min_voice_2char",
+                     "noise_min_voice_3char"):
+            # 噪音判定的"最少语音时长(秒)"：夹到 [0,5]，0=该字数不拦截。
+            sec = max(0.0, min(5.0, float(val)))
+            setattr(c.vad, {
+                "noise_min_voice_1char": "noise_min_voice_1char_sec",
+                "noise_min_voice_2char": "noise_min_voice_2char_sec",
+                "noise_min_voice_3char": "noise_min_voice_3char_sec",
+            }[fid], sec)
+        elif fid == "force_filter":
+            # UI 层传入逗号分隔字符串，保存为纯文字：忽略空格和逗号以外标点。
+            import re
 
-    def _settings_text(self) -> str:
-        """把当前配置渲染为分组、有序、可编辑的设置页文本（含关于信息）。"""
-        from .config import get_api_key
+            from .pipeline import _force_filter_key
 
-        lang = self.cfg.general.language
-        i = 0 if lang == "zh" else 1
-        eng = _enum_display("asr_engine", self.cfg.asr.engine, lang)
-        llm = _enum_display("llm_mode", self.cfg.llm.mode, lang)
-        if self.cfg.llm.mode == "ollama":
-            llm = f"{llm} ({self.cfg.llm.ollama.model})"
-        lines = [
-            f"# ====== {self._t('about_label')} ======",
-            f"# {__app_name__}  v{__version__}",
-            f"# {self._t('about_asr')}: {eng}",
-            f"# {self._t('about_llm')}: {llm}",
-            "#",
-        ]
-        for row in _FIELDS:
-            if row[0] == "H":
-                lines.append("")
-                lines.append(f"# ====== {row[1][i]} ======")
-            elif row[0] == "C":
-                lines.append(f"# {row[1][i]}")
-            else:
-                _, fid, enum, kind = row
-                label = _LABELS[fid][i]
-                if kind == "enum":
-                    disp = _enum_display(enum, self._field_get(fid), lang)
-                elif kind == "secret":
-                    disp = self._KEY_PLACEHOLDER if get_api_key() else ""
-                else:
-                    disp = self._field_get(fid)
-                lines.append(f"{label} = {disp}")
-        return "\n".join(lines)
+            phrases = []
+            for raw_phrase in re.split(r"[,，]", str(val)):
+                phrase = _force_filter_key(raw_phrase)
+                if phrase:
+                    phrases.append(phrase)
+            c.asr.force_filter_phrases = phrases
+        elif fid == "asr_online_base":
+            c.asr.online_base_url = val
+        elif fid == "asr_online_model":
+            c.asr.online_model = val
+        elif fid == "asr_online_key":
+            if val and val != self._KEY_PLACEHOLDER:
+                self.apply_api_key(val)
+        elif fid == "denoise_enabled":
+            enabled = bool(val)
+            c.denoise.enabled = enabled
+            self._clear_denoise_cache()  # 开关变化需重建引擎
+        elif fid == "denoise_attenuation":
+            c.denoise.attenuation = max(0.0, min(1.0, float(val)))
+            self._clear_denoise_cache()  # 参数变化需以新参数重建
+        elif fid == "denoise_dry_wet_mix":
+            c.denoise.dry_wet_mix = max(0.0, min(1.0, float(val)))
+            self._clear_denoise_cache()
+        elif fid == "svr_port":
+            c.asr.sensevoice_server_port = max(1024, min(65535, int(val)))
 
-    def _apply_settings_text(self, text: str) -> None:
-        """解析设置页文本并写回配置（容错：不认识的行/值跳过）。"""
-        idx: dict = {}
-        for row in _FIELDS:
-            if row[0] != "F":
-                continue
-            _, fid, enum, kind = row
-            zh, en = _LABELS[fid]
-            idx[zh] = (fid, enum, kind)
-            idx[en.lower()] = (fid, enum, kind)
-        for line in (text or "").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            spec = idx.get(k.strip()) or idx.get(k.strip().lower())
-            if not spec:
-                continue
-            fid, enum, kind = spec
-            v = v.strip()
-            if kind == "enum":
-                iv = _enum_parse(enum, v)
-                if iv is not None:
-                    self._field_set(fid, iv)
-            elif fid == "pause":
-                sec = parse_pause_seconds(v)
-                if sec is not None:
-                    self._field_set("pause", sec)
-            else:
-                self._field_set(fid, v)
-        self._asr = None  # 引擎/语言可能变，失效缓存
-        save_config(self.cfg)
+    def _default_system_prompt(self) -> str:
+        """返回当前语言/后处理模式下实际生效的内置系统提示词。"""
+        import copy
+
+        from .llm import system_prompt_for
+
+        cfg = copy.deepcopy(self.cfg)
+        cfg.postprocess.prompt_template = ""
+        return system_prompt_for(cfg)
 
     def _restore_defaults(self) -> None:
         from .config import Config as _Config
@@ -1029,11 +1190,14 @@ class VoiceInputApp:
         try:
             from . import settings_ui
 
+            self._warn_default_ollama_model_missing()
             settings_ui.open_settings_window(self)
         except Exception as exc:
-            self._log.warning("打开设置窗口失败: %s", exc)
-            # 兜底：退回纯文本编辑窗
-            self._open_settings_text_fallback()
+            # 新 UI 异常：完整堆栈进日志便于定位，并直接弹错误给用户（旧文本 UI 已删除）
+            self._log.exception("打开设置窗口失败")
+            self._error_alert_with_log_button(
+                self._t("menu_system_settings"),
+                f"设置窗口打开失败：{exc}\n可点击“查看日志”打开 voiceinput.log。")
         # 保存后可能换了引擎/模型：后台预热(本地模型会下载)，避免首次说话卡住
         threading.Thread(target=self._prewarm, kwargs={"notify": True},
                          daemon=True).start()
@@ -1052,6 +1216,33 @@ class VoiceInputApp:
         except Exception as exc:
             self._log.warning("打开日志失败: %s", exc)
 
+    def _clear_logs(self, _s=None) -> None:
+        """清除所有日志文件（仅本应用日志，删前二次确认，不可恢复）。"""
+        import rumps
+
+        from . import logsetup
+
+        # 二次确认（自带前台激活，避免菜单栏应用弹窗卡死）
+        self._activate()
+        try:
+            resp = rumps.alert(
+                title=self._t("menu_clear_logs"),
+                message=self._t("clear_logs_confirm"),
+                ok=self._t("btn_ok"), cancel=self._t("btn_cancel"),
+            )
+        finally:
+            self._deactivate()
+        if resp != 1:                       # 1=确定；0/其它=取消
+            return
+        try:
+            removed = logsetup.clear_logs()  # 仅删 voiceinput.log[.N]/install.log[.N]
+            self._log.info("已清除日志文件 %d 个: %s", len(removed), removed)
+            self._alert(self._t("menu_clear_logs"),
+                        self._t("clear_logs_done", n=len(removed)))
+        except Exception as exc:
+            self._log.exception("清除日志失败")
+            self._alert(self._t("menu_clear_logs"), f"清除失败：{exc}")
+
     def _open_about(self, _s=None) -> None:
         """打开原生「关于」窗口。"""
         try:
@@ -1063,35 +1254,6 @@ class VoiceInputApp:
             import platform
             self._alert(f"{__app_name__} v{__version__}",
                         self._t("about_body", arch=platform.machine()))
-
-    def _open_settings_text_fallback(self) -> None:
-        """兜底：文本编辑式设置（仅当原生窗口异常时使用）。"""
-        import rumps
-
-        try:
-            default_text = self._settings_text()
-            while True:
-                self._activate()
-                win = rumps.Window(
-                    message=self._t("settings_msg"),
-                    title=self._t("menu_system_settings"),
-                    default_text=default_text,
-                    ok=self._t("btn_save"), cancel=self._t("btn_cancel"),
-                    dimensions=(480, 460),
-                )
-                win.add_button(self._t("btn_restore"))
-                resp = win.run()
-                if resp.clicked == 0:
-                    return
-                if resp.clicked == 1:
-                    self._apply_settings_text(resp.text)
-                    self._rebuild_menu()
-                    return
-                self._restore_defaults()
-                self._rebuild_menu()
-                default_text = self._settings_text()
-        finally:
-            self._deactivate()
 
     def _open_settings(self, _sender) -> None:
         from .config import config_path
@@ -1167,6 +1329,20 @@ class VoiceInputApp:
 
         self._log = setup_logging()
         self._log.info("VoiceInput 启动 v%s", __version__)
+        # 自检：确认本进程加载的设置控制器已注册 noiseHistory_（拦截历史按钮依赖它）。
+        # 日志若显示 False，说明跑的是旧代码/旧字节码——是定位“点按钮报 selector”根因的铁证。
+        try:
+            from . import settings_ui
+
+            _c = settings_ui._get_controller_class().alloc().init()
+            self._log.info(
+                "自检 设置控制器: noiseHistory_=%s categoryClicked_=%s | settings_ui=%s",
+                bool(_c.respondsToSelector_("noiseHistory:")),
+                bool(_c.respondsToSelector_("categoryClicked:")),
+                settings_ui.__file__,
+            )
+        except Exception:
+            self._log.exception("自检设置控制器失败")
         app = self.build()
         # 后台预热 ASR 模型（首次说话不再等模型加载）
         threading.Thread(target=self._prewarm, daemon=True).start()

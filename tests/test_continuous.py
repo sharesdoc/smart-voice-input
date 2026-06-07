@@ -83,9 +83,9 @@ def test_segment_worker_processes_in_order(monkeypatch):
     app._seg_queue = queue.Queue()
     app._stop_worker = threading.Event()
 
-    # 入队三段语音 + 结束哨兵
+    # 入队三段语音 + 结束哨兵（队列项为 (段, VAD语音时长) 元组，与生产一致）
     for seg in ("第一段", "第二段", "第三段"):
-        app._seg_queue.put(seg)
+        app._seg_queue.put((seg, 1.0))
     app._seg_queue.put(None)
 
     app._segment_worker()  # 同步跑到 None 退出

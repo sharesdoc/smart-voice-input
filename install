@@ -17,7 +17,7 @@ set -Euo pipefail
 NAME="voiceinput"
 SCRIPT_VERSION="1.0.0"
 DEFAULT_PORT="0"            # 本应用无监听端口；保留以兼容统一选项规范
-DEFAULT_PROFILE="loc"      # 默认 profile；-b 不带参数时使用
+DEFAULT_PROFILE="loc"      # 唯一 profile；-b 默认使用
 
 #===============================================================================
 # 路径与命名空间
@@ -67,7 +67,7 @@ load_install_cfg() {
     PYTHON_BIN="$HOME/ins/miniconda/bin/python"
     WHISPER_MODEL="small"
     LLM_MODE="ollama"
-    OLLAMA_MODEL="qwen2.5:7b-instruct"
+    OLLAMA_MODEL="qwen2.5:7b-instruct-q4_K_M"
     INSTALLED_AT=""
     INSTALLED_VERSION=""
     if [ -f "$INSTALL_CFG_FILE" ]; then
@@ -92,17 +92,15 @@ EOF
 }
 
 load_build_config() {
-    local profile="${1:-}"
+    # 加载基础配置，再叠加 loc profile（唯一环境）
     [ -f "$BUILD_CFG_FILE" ] || { log_error "未找到 $BUILD_CFG_FILE"; exit 2; }
     # shellcheck disable=SC1090
     source "$BUILD_CFG_FILE"
-    if [ -n "$profile" ]; then
-        local profile_file="$BUILD_CFG_FILE.$profile"
-        [ -f "$profile_file" ] || { log_error "未找到 $profile_file"; exit 2; }
-        # shellcheck disable=SC1090
-        source "$profile_file"
-        PROFILE="$profile"
-    fi
+    local profile_file="$BUILD_CFG_FILE.loc"
+    [ -f "$profile_file" ] || { log_error "未找到 $profile_file"; exit 2; }
+    # shellcheck disable=SC1090
+    source "$profile_file"
+    PROFILE="loc"
 }
 
 #===============================================================================
@@ -185,9 +183,8 @@ ollama_reachable() {
 #===============================================================================
 
 cmd_build() {
-    local profile="${1:-}"
-    log_title "Build / 校验 (profile=${profile:-$DEFAULT_PROFILE})"
-    load_build_config "${profile:-$DEFAULT_PROFILE}"
+    log_title "Build / 校验 (profile=loc)"
+    load_build_config
     require_python
     detect_env   # 检测系统架构(Intel/ARM)与可用引擎
 
@@ -217,64 +214,203 @@ cmd_build() {
             log_warn "未安装 pytest，跳过测试（可先执行 -i）"
         fi
     fi
-    log_info "校验通过。profile=$PROFILE WHISPER_MODEL=${WHISPER_MODEL} LLM_MODE=${LLM_MODE}"
+    log_info "校验通过。profile=loc WHISPER_MODEL=${WHISPER_MODEL} LLM_MODE=${LLM_MODE}"
+}
+
+# ---- 按需安装：引擎 key ↔ 配置名/依赖文件/是否需下载本地模型 的映射 ----
+# 引擎 key：fw=faster-whisper  sv=SenseVoice  mlx=MLX  ds=阿里在线  on=OpenAI兼容在线
+engine_config_name() {           # key → voiceinput 配置里的 asr.engine 取值
+    case "$1" in
+        fw)  echo "whisper_local" ;;
+        sv)  echo "sensevoice" ;;
+        mlx) echo "mlx_whisper" ;;
+        ds)  echo "dashscope" ;;
+        on)  echo "online" ;;
+    esac
+}
+engine_req_file() {              # key → requirements 分组文件（on 复用 base，无单独文件）
+    case "$1" in
+        fw)  echo "requirements/asr-faster-whisper.txt" ;;
+        sv)  echo "requirements/asr-sensevoice.txt" ;;
+        mlx) echo "requirements/asr-mlx.txt" ;;
+        ds)  echo "requirements/asr-online.txt" ;;
+        on)  echo "" ;;
+    esac
+}
+engine_needs_model() {           # key → 是否需要预下载本地模型（在线引擎不需要）
+    case "$1" in
+        fw|sv|mlx) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 交互选择 ASR 引擎（可多选）；结果写入全局数组 SEL_ENGINES（引擎 key）
+prompt_asr_engines() {
+    local arch="$1"
+    log_title "① 选择要安装的 ASR 语音识别引擎（可多选）"
+    printf "  1) faster-whisper   本地 Whisper，跨平台，%s无需 PyTorch%s（推荐）\n" "$BOLD" "$NC" >&2
+    printf "  2) SenseVoice       本地极速·自带标点；%s需 PyTorch，体积最大%s\n" "$YELLOW" "$NC" >&2
+    if [ "$arch" = "arm64" ]; then
+        printf "  3) MLX Whisper      Apple Silicon 加速（仅 arm64）\n" >&2
+    else
+        printf "  3) MLX Whisper      %s（不可用：仅 Apple Silicon）%s\n" "$YELLOW" "$NC" >&2
+    fi
+    printf "  4) 阿里云在线        DashScope Fun-ASR，%s最轻量·无 PyTorch%s（需 API Key）\n" "$GREEN" "$NC" >&2
+    printf "  5) OpenAI 兼容在线   Whisper API，%s无需额外依赖%s（需 API Key）\n" "$GREEN" "$NC" >&2
+    printf "  6) %s安装全部%s          安装以上所有可用引擎\n" "$BOLD" "$NC" >&2
+    printf "%s请输入编号（空格分隔可多选，如 '1 3' 或 '2 4 5'），回车默认 1: %s" "$BOLD" "$NC" >&2
+    local ans; read -r ans
+    ans="${ans//$'\r'/}"          # 去除部分终端/粘贴带来的回车符，避免编号匹配失败
+    [ -z "$ans" ] && ans="1"
+    SEL_ENGINES=()
+    local n
+    for n in $(printf '%s' "$ans" | tr ',' ' '); do
+        case "$n" in
+            1) SEL_ENGINES+=("fw") ;;
+            2) SEL_ENGINES+=("sv") ;;
+            3) if [ "$arch" = "arm64" ]; then SEL_ENGINES+=("mlx"); else log_warn "MLX 仅 Apple Silicon 可用，已忽略"; fi ;;
+            4) SEL_ENGINES+=("ds") ;;
+            5) SEL_ENGINES+=("on") ;;
+            6) SEL_ENGINES=("fw" "sv")
+                if [ "$arch" = "arm64" ]; then SEL_ENGINES+=("mlx"); fi
+                SEL_ENGINES+=("ds" "on")
+                break ;;
+            *) log_warn "忽略无效编号: $n" ;;
+        esac
+    done
+    [ ${#SEL_ENGINES[@]} -gt 0 ] || SEL_ENGINES=("fw")
+}
+
+# 交互选择 LLM 文本后处理；结果写入 SEL_LLM(ollama|online|off)、OLLAMA_MODEL、LLM_PULL(0/1)
+prompt_llm() {
+    log_title "② 选择 LLM 文本后处理方式（润色/整理识别结果）"
+    printf "  1) Ollama 本地大模型   离线润色；%s需本地 Ollama，模型大(默认 %s ~4.7GB)%s\n" "$YELLOW" "$OLLAMA_MODEL" "$NC" >&2
+    printf "     如本地未安装默认模型，可执行：ollama pull %s; ollama list\n" "$OLLAMA_MODEL" >&2
+    printf "  2) OpenAI 兼容在线     调用在线 API（需 API Key），%s无需下载%s\n" "$GREEN" "$NC" >&2
+    printf "  3) 不启用              纯语音转写，不做润色（无任何下载）\n" >&2
+    printf "%s请选择(1/2/3)，回车默认 3(不启用): %s" "$BOLD" "$NC" >&2
+    local ans; read -r ans
+    ans="${ans//$'\r'/}"
+    [ -z "$ans" ] && ans="3"
+    LLM_PULL=0
+    case "$ans" in
+        1)  SEL_LLM="ollama"
+            printf "%s  Ollama 模型名(回车用默认 %s): %s" "$BOLD" "$OLLAMA_MODEL" "$NC" >&2
+            local m; read -r m; m="${m//$'\r'/}"; [ -n "$m" ] && OLLAMA_MODEL="$m"
+            printf "%s  现在就拉取该模型吗？体积较大(y/N): %s" "$BOLD" "$NC" >&2
+            local p; read -r p; p="${p//$'\r'/}"
+            case "$p" in y|Y|yes|YES) LLM_PULL=1 ;; *) LLM_PULL=0 ;; esac
+            ;;
+        2)  SEL_LLM="online" ;;
+        *)  SEL_LLM="off" ;;
+    esac
 }
 
 cmd_install() {
-    log_title "Install / 安装依赖、下载模型并初始化配置"
+    log_title "Install / 按需安装（只装你选的引擎与模型）"
     ensure_dirs
     load_build_config "$DEFAULT_PROFILE"
     require_python
     detect_env   # 检测系统架构(Intel/ARM)、Python 架构与可用引擎
+    local arch; arch="$(uname -m)"
 
-    log_info "安装全部 Python 依赖 (pip install -r requirements.txt，含各 ASR 引擎)…"
-    log_info "（首次含 torch/funasr/mlx 等，体积较大，请耐心等待下载）"
-    "$PYTHON_BIN" -m pip install -r "$PROJECT_DIR/requirements.txt" \
-        || { log_error "依赖安装失败"; exit 3; }
+    # 选择来源：有 TTY 则交互勾选；无 TTY(CI/管道) 退回 build-configuration 默认，且不自动拉 Ollama
+    if [ -t 0 ]; then
+        prompt_asr_engines "$arch"
+        prompt_llm
+    else
+        log_warn "非交互环境(无 TTY)：按 build-configuration 默认引擎安装，且不自动拉取 Ollama 大模型。"
+        case "${ASR_ENGINE:-whisper_local}" in
+            sensevoice)   SEL_ENGINES=("sv") ;;
+            mlx_whisper)  SEL_ENGINES=("mlx") ;;
+            dashscope)    SEL_ENGINES=("ds") ;;
+            online)       SEL_ENGINES=("on") ;;
+            *)            SEL_ENGINES=("fw") ;;
+        esac
+        SEL_LLM="${LLM_MODE:-off}"
+        LLM_PULL=0
+    fi
 
-    # 用 build-configuration 的取值预置应用配置（复用 voiceinput 自身的配置模块，幂等）
-    log_info "初始化应用配置（whisper=${WHISPER_MODEL} llm=${LLM_MODE} ollama=${OLLAMA_MODEL}）…"
-    ( cd "$PROJECT_DIR" && ASR_ENGINE="${ASR_ENGINE:-}" "$PYTHON_BIN" - <<PY
+    local primary; primary="$(engine_config_name "${SEL_ENGINES[0]}")"
+    log_info "已选 ASR 引擎: ${SEL_ENGINES[*]}（主引擎=${primary}）；LLM: ${SEL_LLM}"
+
+    # 1) pip 安装：base + 选中引擎组（去重）
+    local req_args=(-r "$PROJECT_DIR/requirements/base.txt")
+    local seen_files=" base "
+    local k rf
+    for k in "${SEL_ENGINES[@]}"; do
+        rf="$(engine_req_file "$k")"
+        [ -z "$rf" ] && continue
+        case "$seen_files" in *" $rf "*) continue ;; esac
+        seen_files="$seen_files$rf "
+        req_args+=(-r "$PROJECT_DIR/$rf")
+    done
+    # pip 自身会跳过已安装的包（Requirement already satisfied），先做一次快速检查
+    if "$PYTHON_BIN" -m pip install --dry-run --report /dev/null "${req_args[@]}" 2>/dev/null | grep -q "would install"; then
+        log_info "pip 安装：基础依赖 + 选中引擎依赖…（SenseVoice 含 torch，体积较大请耐心）"
+        "$PYTHON_BIN" -m pip install "${req_args[@]}" \
+            || { log_error "依赖安装失败"; exit 3; }
+    else
+        log_info "pip 依赖已全部满足，跳过安装 ✓"
+    fi
+
+    # 2) 写应用配置：主引擎 + whisper 模型 + LLM 模式/模型
+    LLM_MODE="$SEL_LLM"
+    log_info "初始化应用配置（asr=${primary} whisper=${WHISPER_MODEL} llm=${LLM_MODE} ollama=${OLLAMA_MODEL}）…"
+    ( cd "$PROJECT_DIR" && ASR_ENGINE="$primary" LLM_MODE="$LLM_MODE" \
+        WHISPER_MODEL="$WHISPER_MODEL" OLLAMA_MODEL="$OLLAMA_MODEL" "$PYTHON_BIN" - <<'PY'
 import os
 from voiceinput.config import load_config, save_config
 c = load_config()
-c.asr.whisper_model = "${WHISPER_MODEL}"
-c.llm.mode = "${LLM_MODE}"
-c.llm.ollama.model = "${OLLAMA_MODEL}"
-eng = os.environ.get("ASR_ENGINE")
-if eng:
-    c.asr.engine = eng
+c.asr.engine = os.environ["ASR_ENGINE"]
+c.asr.whisper_model = os.environ["WHISPER_MODEL"]
+c.llm.mode = os.environ["LLM_MODE"]
+c.llm.ollama.model = os.environ["OLLAMA_MODEL"]
 save_config(c)
 print("应用配置已写入")
 PY
 ) || log_warn "预置应用配置失败（首次启动时应用会自动生成默认配置）"
 
-    # 预下载「当前配置」所用的本地语音模型（whisper/mlx/sensevoice），装好即可离线用。
-    # 在线引擎(dashscope/online)无需下载。
-    log_title "下载语音模型（按当前 ASR 引擎）"
-    ( cd "$PROJECT_DIR" && "$PYTHON_BIN" - <<'PY'
+    # 3) 仅下载「选中的本地引擎」的语音模型（在线引擎跳过）
+    local dl_engines=()
+    for k in "${SEL_ENGINES[@]}"; do
+        if engine_needs_model "$k"; then dl_engines+=("$(engine_config_name "$k")"); fi
+    done
+    if [ ${#dl_engines[@]} -gt 0 ]; then
+        log_title "③ 下载选中本地引擎的语音模型: ${dl_engines[*]}"
+        ( cd "$PROJECT_DIR" && VI_DL_ENGINES="${dl_engines[*]}" "$PYTHON_BIN" - <<'PY'
+import os
 from voiceinput.config import load_config
 from voiceinput.asr import make_asr
-c = load_config()
-eng = c.asr.engine
-if eng in ("dashscope", "online"):
-    print(f"  ASR={eng} 为在线引擎，无需下载本地模型。")
-else:
-    print(f"  下载/加载 ASR 模型: {eng} …（首次较大，请耐心）")
-    a = make_asr(c)
-    if hasattr(a, "_ensure_model"):
-        a._ensure_model()
-    print("  ASR 模型已就绪。")
+base = load_config()
+for eng in os.environ.get("VI_DL_ENGINES", "").split():
+    try:
+        c = load_config()
+        c.asr.engine = eng
+        print(f"  下载/加载 ASR 模型: {eng} …（首次较大，请耐心）")
+        a = make_asr(c)
+        if hasattr(a, "_ensure_model"):
+            a._ensure_model()
+        print(f"  ✓ {eng} 模型已就绪。")
+    except Exception as e:
+        print(f"  ! {eng} 预下载失败（首次使用时会自动重试）：{e}")
 PY
-) || log_warn "语音模型预下载失败（首次使用时会自动重试下载）"
+) || log_warn "部分语音模型预下载失败（首次使用时会自动重试下载）"
+    else
+        log_info "所选均为在线引擎，无需下载本地语音模型。"
+    fi
 
-    # 预拉取「当前配置」所用的本地大模型（Ollama）。
-    if [ "$LLM_MODE" = "ollama" ]; then
-        if command -v ollama >/dev/null 2>&1; then
-            log_info "拉取 Ollama 大模型: ${OLLAMA_MODEL} …"
-            ollama pull "${OLLAMA_MODEL}" || log_warn "ollama pull 失败（可稍后手动：ollama pull ${OLLAMA_MODEL}）"
+    # 4) 仅当选 Ollama 且用户明确同意时才拉取大模型（4.7GB）
+    if [ "$SEL_LLM" = "ollama" ]; then
+        if [ "$LLM_PULL" = "1" ]; then
+            if command -v ollama >/dev/null 2>&1; then
+                log_title "④ 拉取 Ollama 大模型: ${OLLAMA_MODEL}"
+                ollama pull "${OLLAMA_MODEL}" || log_warn "ollama pull 失败（可稍后手动：ollama pull ${OLLAMA_MODEL}）"
+            else
+                log_warn "未找到 ollama 命令；请先安装 Ollama，再手动：ollama pull ${OLLAMA_MODEL}"
+            fi
         else
-            log_warn "未找到 ollama 命令；如需本地大模型加工，请先安装 Ollama 再 'ollama pull ${OLLAMA_MODEL}'。"
+            log_info "已选 Ollama 但未现在拉取。需要时手动执行：ollama pull ${OLLAMA_MODEL}"
         fi
     fi
 
@@ -322,6 +458,8 @@ cmd_start() {
         exit 3
     fi
     [ -f "$INSTALL_CFG_FILE" ] || log_warn "未执行过 -i：将用应用默认配置直跑（首次启动自动生成配置）。"
+    # 清旧字节码：避免改了源码但 .pyc 未失效导致仍跑旧代码（曾因此漏掉新增方法）。
+    find "$PROJECT_DIR/voiceinput" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
     log_info "nohup 后台启动 voiceinput…"
     ( cd "$PROJECT_DIR" && nohup "$PYTHON_BIN" -m voiceinput >> "$MAIN_LOG_FILE" 2>&1 & echo $! > "$PID_FILE" )
     sleep 1
@@ -452,15 +590,16 @@ cmd_benchmark() {
 cmd_help() {
     load_install_cfg
     cat <<EOF
-install (VoiceInput) v${SCRIPT_VERSION} 
+install (VoiceInput) v${SCRIPT_VERSION}  (生成自 write-install-shell)
 
 macOS AI 智能语音输入 —— Python 菜单栏桌面应用（从源码运行 + nohup 后台 + conda base）
 
 用法：./install [选项 ...]
 
 选项：
-  -b [profile]      校验/构建（py_compile + pytest；profile 读 build-configuration.<profile>）
-  -i                安装 Python 依赖并初始化应用配置（幂等）；依赖已就绪时可跳过，直接 -s
+  -b                校验/构建（py_compile + pytest；使用 loc profile）
+  -i                按需安装：交互勾选 ASR 引擎 + LLM 后处理，只装/只下载你选的（幂等）
+                    无 TTY 时退回 build-configuration 默认引擎，且不自动拉取 Ollama 大模型
   -u                卸载（停止 + 取消开机自启；保留配置/数据/模型）
   -d                彻底清除（删配置/日志/自启项；保留源码与模型缓存；需输入 yes）
   -s                启动（nohup 后台）
@@ -507,11 +646,7 @@ parse_args() {
                 assert_port "$1"; PORT="$1"
                 log_warn "本应用无监听端口，-p/--port 被忽略" ;;
             -b)
-                if [ $# -ge 2 ] && [[ "$2" != -* ]]; then
-                    ACTIONS+=("build:$2"); shift
-                else
-                    ACTIONS+=("build:")
-                fi ;;
+                ACTIONS+=("build:") ;;
             -t)
                 # 测试套件：用法 -t asr [wav]（目前仅 asr：ASR 引擎速度基准）
                 local twav=""

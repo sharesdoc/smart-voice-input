@@ -1,0 +1,11 @@
+# ASR 引擎：SenseVoice 极速本地引擎（非自回归，~70x 实时，自带标点）
+# 依赖 funasr + PyTorch，体积最大（torch/torchaudio 数百 MB）。
+#
+# 钉住 numba/llvmlite：llvmlite 0.47+ 在 Intel(x86_64) mac 无预编译 wheel，
+# 会触发从源码编译并因缺少 LLVM 开发库而失败；0.45.x 有 x86_64 wheel。
+# numba 0.62 要求 numpy<2.4（会把 base 的 numpy 收敛到 2.3.x）。
+llvmlite==0.45.1
+numba==0.62.1
+funasr>=1.3.0
+torch>=2.2
+torchaudio>=2.2

@@ -65,7 +65,14 @@ STRINGS: dict[str, dict[str, str]] = {
     "menu_viewcfg": {"zh": "查看配置…", "en": "View Config…"},
     "menu_about":   {"zh": "关于",      "en": "About"},
     "menu_logs":    {"zh": "查看日志",  "en": "View Logs"},
+    "menu_clear_logs": {"zh": "清除日志", "en": "Clear Logs"},
     "menu_quit":    {"zh": "退出",      "en": "Quit"},
+    "clear_logs_confirm": {
+        "zh": "确定删除全部日志文件？此操作不可恢复（仅删除日志，不影响配置）。",
+        "en": "Delete all log files? This cannot be undone (logs only; settings untouched).",
+    },
+    "clear_logs_done": {"zh": "已清除 {n} 个日志文件。", "en": "Cleared {n} log file(s)."},
+    "btn_ok": {"zh": "确定", "en": "OK"},
     "menu_system_settings": {"zh": "系统配置", "en": "System Settings…"},
     "settings_msg": {
         "zh": ("编辑下面各项后点【保存】；【恢复默认】会清空全部设置回到初始状态。\n"

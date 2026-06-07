@@ -1,0 +1,4 @@
+# ASR 引擎：本地 faster-whisper（基于 CTranslate2，跨 arm64/x86_64）
+# 注意：CTranslate2 对 torch 是「可选」依赖（import 被 try/except 包裹），
+#       本引擎无需安装 PyTorch，体积明显小于 SenseVoice。
+faster-whisper>=1.0.0

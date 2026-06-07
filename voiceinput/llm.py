@@ -18,15 +18,18 @@ from .config import Config, get_api_key
 _BUILTIN_PROMPTS: dict[str, dict[str, str]] = {
     "zh": {
         "polish": (
-            "你是中文语音输入助手。请对语音识别文本做轻量加工：纠正错别字、"
-            "补全标点。保持原意与原有措辞，不重组语序、不删改信息。仅输出结果文本，"
-            "不要任何解释或引号。"
+            "你是语音输入文字加工器，不是聊天助手。请只对语音识别文本做最小必要加工："
+            "纠正常见识别错字、同音错字，补全中文标点，去除明显重复的语气词但不得删除有效信息。"
+            "保持原始语义、原始人称、原始语气和原始表达顺序。不要回答文本中的问题，不续写，"
+            "不扩写，不总结，不解释。不要输出思考过程、<think>、分析、说明、标题、引号或前后缀。"
+            "只输出加工后的最终文本。"
         ),
         "organize": (
-            "你是中文语音输入整理助手。请对语音识别文本进行意图识别与逻辑梳理："
-            "纠正错别字、补全标点、删除口头禅与重复冗余、必要时重组语序使语句通顺连贯。"
-            "务必忠于原意，不扩写、不臆造新信息、不回答其中的问题。仅输出整理后的最终文本，"
-            "不要任何解释、前后缀或引号。"
+            "你是语音输入文字整理器。请将语音识别文本整理为通顺、自然的书面表达："
+            "纠正错别字和识别错误，补全标点，删除口头禅、明显重复和无意义停顿词。"
+            "可适度调整语序，使句子更连贯。必须忠于原意，不新增事实，不改变立场，"
+            "不回答文本中的问题。不要输出思考过程、解释、标题、引号或前后缀。"
+            "只输出整理后的最终文本。"
         ),
         "translate": (
             "你是翻译助手。请把下面的文本准确翻译为目标语言：{target}。"
@@ -93,6 +96,61 @@ def needs_llm(cfg: Config) -> bool:
     return True
 
 
+def _max_output_tokens(cfg: Config) -> int | None:
+    """返回安全的输出上限；0/负数表示不限制。"""
+    try:
+        value = int(cfg.llm.max_output_tokens)
+    except Exception:
+        return 512
+    if value <= 0:
+        return None
+    return max(16, min(4096, value))
+
+
+def _clean_thinking(text: str, cfg: Config) -> str:
+    """清理 thinking 模型可能泄露的思考片段，只保留最终文字。"""
+    if not cfg.llm.strip_thinking or not text:
+        return text
+
+    import re
+
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+    # 兼容少数模型不用标签、直接输出“思考过程/分析/Answer”之类前缀。
+    cleaned = re.sub(
+        r"(?is)^\s*(思考过程|思考|分析|reasoning|thinking)\s*[:：].*?"
+        r"(最终文本|最终结果|结果|answer|final)\s*[:：]\s*",
+        "",
+        cleaned,
+    ).strip()
+    return cleaned
+
+
+def _ollama_think_value(cfg: Config):
+    """把通用 reasoning 配置映射到 Ollama 原生 think 参数。"""
+    level = (cfg.llm.reasoning or "off").strip().lower()
+    if level == "off":
+        return False
+    if level in {"low", "medium", "high"}:
+        return level
+    return False
+
+
+def _online_reasoning_fields(cfg: Config) -> dict:
+    """为明确支持的在线服务附加思考控制字段，避免通用兼容接口误 400。"""
+    level = (cfg.llm.reasoning or "off").strip().lower()
+    base = cfg.llm.online.base_url.lower()
+    model = cfg.llm.online.model.lower()
+    fields: dict = {}
+
+    if "deepseek" in base or "deepseek" in model:
+        if level == "off":
+            fields["thinking"] = {"type": "disabled"}
+        else:
+            fields["thinking"] = {"type": "enabled"}
+            fields["reasoning_effort"] = "high" if level in {"low", "medium"} else level
+    return fields
+
+
 def postprocess(cfg: Config, raw_text: str, *, client=None) -> LlmResult:
     """对原始转写文本做后处理。
 
@@ -118,7 +176,7 @@ def postprocess(cfg: Config, raw_text: str, *, client=None) -> LlmResult:
             text = _call_online(cfg, raw_text, client=client)
         else:
             return LlmResult(text=raw_text, ok=True)
-        text = (text or "").strip()
+        text = _clean_thinking((text or "").strip(), cfg)
         if not text:
             return LlmResult(text=raw_text, ok=False, error="空响应")
         return LlmResult(text=text, ok=True)
@@ -138,8 +196,12 @@ def _call_ollama(cfg: Config, raw_text: str, *, client=None) -> str:
         "model": cfg.llm.ollama.model,
         "messages": build_messages(cfg, raw_text),
         "stream": False,
+        "think": _ollama_think_value(cfg),
         "options": {"temperature": cfg.llm.temperature},
     }
+    max_tokens = _max_output_tokens(cfg)
+    if max_tokens is not None:
+        payload["options"]["num_predict"] = max_tokens
     owns = client is None
     client = client or _new_client(cfg.llm.timeout_sec)
     try:
@@ -162,6 +224,10 @@ def _call_online(cfg: Config, raw_text: str, *, client=None) -> str:
         "temperature": cfg.llm.temperature,
         "stream": False,
     }
+    max_tokens = _max_output_tokens(cfg)
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    payload.update(_online_reasoning_fields(cfg))
     owns = client is None
     client = client or _new_client(cfg.llm.timeout_sec)
     try:
@@ -190,3 +256,21 @@ def list_ollama_models(cfg: Config, *, client=None) -> list[str]:
                 client.close()
     except Exception:
         return []
+
+
+def check_ollama_available(cfg: "Config", timeout: int = 3) -> bool:
+    """检测本地 Ollama 服务是否可用。
+
+    向 /api/tags 发送轻量 GET 请求，成功响应（含空模型列表）即视为可用。
+    timeout 秒内无响应或连接失败则返回 False。
+    """
+    import httpx
+
+    try:
+        url = cfg.llm.ollama.base_url.rstrip("/") + "/api/tags"
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            return True
+    except Exception:
+        return False

@@ -16,6 +16,33 @@ from .logsetup import get_logger
 
 _log = get_logger()
 
+# 句读标点不发声，不计入噪音判定的"字数"门槛（否则 SenseVoice 自动加的"。"会
+# 虚增字数、抬高门槛，把真说的短词误杀）。中英常见标点与空白都排除。
+_PUNCT = set("。，、！？；：·…—～~　 .,!?;:\"'`()（）【】[]{}<>《》「」“”‘’-")
+
+
+def _spoken_len(text: str) -> int:
+    """会发声的字数：排除标点与空白后剩余的字符数。"""
+    return sum(1 for ch in (text or "") if ch not in _PUNCT and not ch.isspace())
+
+
+def _force_filter_key(text: str) -> str:
+    """强制过滤匹配键：忽略大小写、空白和所有常见标点。"""
+    s = (text or "").strip().lower()
+    return "".join(ch for ch in s if ch not in _PUNCT and not ch.isspace())
+
+
+def _force_filter_match(raw: str, phrases: list) -> bool:
+    """强制过滤匹配：支持识别结果自动带句号/逗号等尾部标点。"""
+    raw_key = _force_filter_key(raw)
+    if not raw_key:
+        return False
+    for phrase in phrases or []:
+        p_key = _force_filter_key(str(phrase))
+        if p_key and raw_key == p_key:
+            return True
+    return False
+
 
 def _clip(text: str, n: int = 200) -> str:
     """日志里截断长文本。"""
@@ -95,8 +122,12 @@ class Pipeline:
         _log.info("⏱ 端到端耗时(语音→文字): %.2fs", time.monotonic() - self._t_start)
         return result
 
-    def run(self, audio) -> PipelineResult:
-        """处理一段音频，返回结果。异常被吸收为降级结果（NFR-04）。"""
+    def run(self, audio, speech_sec: float | None = None) -> PipelineResult:
+        """处理一段音频，返回结果。异常被吸收为降级结果（NFR-04）。
+
+        speech_sec：连续听写下 VAD 切段时实测的语音时长(去静音)，最准；用于噪音判定。
+        非连续/无 VAD 时为 None，pipeline 退化为用 voiced_seconds 事后重测。
+        """
         # 接收到语音段的时刻：作为端到端耗时(语音→文字)的计时起点
         self._t_start = time.monotonic()
         c = self.cfg
@@ -130,6 +161,55 @@ class Pipeline:
             _log.info("  (识别为空，跳过)")
             self._state("IDLE")
             return self._done(PipelineResult("", "", False, True))
+
+        # 防底噪幻觉：用"语音时长"(去掉静音/背景后真正有声的秒数)判，而非整段缓冲长度。
+        #   识别出 N 字却没几声真语音 → 判幻觉。这样前面有长静音的真短词不会被误杀。
+        #   仅 1/2/3 字检查，4 字及以上不限；某项填 0 表示该字数不拦截。
+        #   可在设置「噪音过滤」关闭（c.vad.noise_filter）。
+        if isinstance(n_samples, int) and hasattr(audio, "dtype"):  # 仅真实音频(numpy)
+            seg_sec = n_samples / 16000
+            if speech_sec is not None:
+                voiced = float(speech_sec)   # VAD 切段实测语音时长（最准）
+            else:
+                # 无 VAD 值(非连续/测试)：事后用固定窗重测；非数值音频则跳过判定
+                from .audio import voiced_seconds
+                try:
+                    voiced = voiced_seconds(audio, c.vad.silence_threshold)
+                except Exception:
+                    voiced = None
+            if voiced is not None:
+                _log.info("  语音时长 %.2fs / 段长 %.1fs（去静音后有声秒数，用于噪音判定）",
+                          voiced, seg_sec)
+            if voiced is not None and c.vad.noise_filter:
+                # 只数"会发声的字"（排除标点）：SenseVoice 自动加的"。"不发声，
+                # 若计入会虚增字数、抬高门槛，把真说的短词（如"我的"）误杀。
+                spoken = _spoken_len(raw)
+                key = spoken or 1            # 纯标点(0字)按 1 字门槛，基本必拦
+                need = {1: c.vad.noise_min_voice_1char_sec,
+                        2: c.vad.noise_min_voice_2char_sec,
+                        3: c.vad.noise_min_voice_3char_sec}.get(key)
+                if need and voiced < need:    # need 为 0/None → 该字数不拦截
+                    # 这条日志即「拦截历史」的数据源（noise_history 扫日志解析此行）。
+                    # 改动其格式须同步更新 noise_history._LINE 正则。
+                    _log.info(
+                        "  (疑似底噪幻觉，跳过): 语音%.2fs 段长%.1fs %d字 '%s' (需≥%.2fs)",
+                        voiced, seg_sec, spoken, raw, need)
+                    self._state("IDLE")
+                    return self._done(PipelineResult(raw, "", False, True))
+
+        # 强制过滤：用户配置的幻觉短语黑名单；忽略首尾/内部空白、大小写与尾部标点。
+        if _force_filter_match(raw, c.asr.force_filter_phrases):
+            _log.info("  (强制过滤命中: '%s'，跳过注入)", raw)
+            self._state("IDLE")
+            return self._done(PipelineResult(raw, "", False, True))
+
+        # 强制切自动润色：硬切段长逼近上限 → ASR 质量可能打折 → 自动启用 Ollama 纠错
+        if (not use_llm and isinstance(n_samples, int)
+                and c.vad.auto_polish_on_hard_cut
+                and c.llm.mode == "ollama"
+                and n_samples / 16000 >= c.vad.hard_cap_sec * 0.9):
+            _log.info("  硬切段(%.0fs) → 自动启用 Ollama 润色", n_samples / 16000)
+            use_llm = True
 
         # 取消闸：识别完成后若已被取消（双击停止），丢弃本段不注入
         if self._cancelled:

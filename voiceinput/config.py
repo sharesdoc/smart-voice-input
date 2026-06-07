@@ -20,6 +20,8 @@ _KEYCHAIN_SERVICE = "VoiceInput"
 _KEYCHAIN_ACCOUNT = "online_api_key"
 _KEYCHAIN_DASHSCOPE = "dashscope_api_key"
 
+DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct-q4_K_M"
+
 
 @dataclass
 class GeneralConfig:
@@ -50,6 +52,8 @@ class AsrConfig:
     mlx_model: str = "mlx-community/whisper-large-v3-turbo"
     # SenseVoice (极快本地引擎，自带标点)
     sensevoice_model: str = "FunAudioLLM/SenseVoiceSmall"
+    # SenseVoice ASR HTTP 服务端口（局域网共享用，startup-asr-server 使用）
+    sensevoice_server_port: int = 18765
     # 阿里云 DashScope Fun-ASR (在线)
     dashscope_model: str = "paraformer-realtime-v2"
     # Key 来源：env=用环境变量 DASHSCOPE_API_KEY | manual=用手动输入(存钥匙串)
@@ -57,6 +61,11 @@ class AsrConfig:
     # 在线 ASR (FR-06)；API Key 复用在线 LLM 的钥匙串项
     online_base_url: str = "https://api.openai.com/v1"
     online_model: str = "whisper-1"
+    # 强制过滤：配置只存纯文字；匹配时自动忽略识别结果里的空格与尾部标点。
+    # 用于过滤引擎幻觉短语，如 "Yeah"。
+    force_filter_phrases: list = field(default_factory=lambda: [
+        "我", "我的", "我是", "是的", "Yeah", "字幕by索兰娅", "嗯", "嗯嗯",
+    ])
 
 
 @dataclass
@@ -66,15 +75,32 @@ class VadConfig:
     默认开启：按一次快捷键进入听写，说完停顿即自动断句并打字，无需再次按键。
     """
     enabled: bool = True
-    silence_threshold: float = 0.02  # RMS 静音阈值（略高更易判静音，适应环境底噪）
+    silence_threshold: float = 0.036  # RMS 静音阈值（+80% 于原 0.02，逐次 20% 收敛）
     silence_sec: float = 1.0         # 连续静音多久判定结束（更跟手）
     min_speech_sec: float = 0.3      # 至少检测到这么长语音后才允许结束
+    # 软封顶（针对放录音/少停顿场景）：单段超 soft_cap_sec 后逐步放宽所需静音，
+    # 就近在微停顿处切段；达 hard_cap_sec 仍无停顿则硬切兜底。0 表示禁用。
+    # 注：在线 ASR/翻译有单次时长上限且 30s 超时，使用在线引擎时建议调小（如 25/40）。
+    soft_cap_sec: float = 180.0      # 3 分钟开始放宽静音要求
+    hard_cap_sec: float = 360.0      # 6 分钟绝对上限（硬切兜底）
+    soft_cap_step_sec: float = 60.0  # 阶梯减半的步进间隔（秒）
+    auto_polish_on_hard_cut: bool = True  # 强制切段后自动启用 Ollama 智能润色
+    # 底噪幻觉拦截：SenseVoice 等引擎会把环境底噪误识别成短词（如"我。"）。
+    # 判据用"语音时长"（去掉静音/背景后真正有声的累计秒数）而非整段缓冲长度——
+    # 识别出 N 个字却几乎没有真实语音 → 判为幻觉跳过注入；前面有长静音的真短词不误杀。
+    noise_filter: bool = True
+    # 各字数所需的"最少语音时长(秒)"：识别出 N 字但有声语音不足对应秒数 → 判噪音。
+    # 仅 1/2/3 字做此检查，4 字及以上不限。某项填 0 表示该字数不拦截。可在设置页改。
+    # 默认偏保守：只拦"几乎没发声"的纯底噪幻觉，正常语速的真短词(实测低至~0.06s)一律放行。
+    noise_min_voice_1char_sec: float = 0.05
+    noise_min_voice_2char_sec: float = 0.05
+    noise_min_voice_3char_sec: float = 0.07
 
 
 @dataclass
 class OllamaConfig:
     base_url: str = "http://localhost:11434"
-    model: str = "qwen2.5:7b-instruct"
+    model: str = DEFAULT_OLLAMA_MODEL
 
 
 @dataclass
@@ -90,8 +116,31 @@ class LlmConfig:
     mode: str = "ollama"  # ollama | online | off
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     online: OnlineConfig = field(default_factory=OnlineConfig)
-    temperature: float = 0.2
+    # 语音输入后处理要求稳定、少改写，默认用低随机性。
+    temperature: float = 0.0
     timeout_sec: int = 20
+    # 限制异常长输出；0 表示不限制。
+    max_output_tokens: int = 512
+    # off | low | medium | high。off 优先用于禁用思考模型，降低延迟并避免改写原话。
+    reasoning: str = "off"
+    # 兜底清理 thinking 模型泄露的 <think>...</think> 或“思考过程”前缀。
+    strip_thinking: bool = True
+
+
+@dataclass
+class DenoiseConfig:
+    """神经网络降噪 (DeepFilterNet3)，基于 ONNX Runtime 实时降噪。
+
+    默认关闭，避免影响现有行为。用户手动在设置中开启。
+    降噪在 VAD 之前执行——先清理音频中的环境噪声，再做人声检测和识别。
+    加载失败或处理异常时自动直通原始音频，不阻断录音链路。
+    """
+    enabled: bool = False
+    engine: str = "onnx"              # onnx | subprocess
+    onnx_model_path: str = "deepfilternet3.onnx"  # 相对于 config_dir 或绝对路径
+    attenuation: float = 0.8          # 降噪强度 0.0~1.0
+    dry_wet_mix: float = 0.9          # 干湿混合比 0.0~1.0
+    resample_quality: str = "fast"     # fast | high
 
 
 @dataclass
@@ -109,6 +158,7 @@ class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     vad: VadConfig = field(default_factory=VadConfig)
+    denoise: DenoiseConfig = field(default_factory=DenoiseConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
 
@@ -139,6 +189,7 @@ class Config:
             hotkey=build(HotkeyConfig, data.get("hotkey")),
             asr=build(AsrConfig, data.get("asr")),
             vad=build(VadConfig, data.get("vad")),
+            denoise=build(DenoiseConfig, data.get("denoise")),
             llm=llm,
             postprocess=build(PostprocessConfig, data.get("postprocess")),
         )
